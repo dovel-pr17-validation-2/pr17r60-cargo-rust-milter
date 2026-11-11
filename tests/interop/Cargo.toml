@@ -1,0 +1,18 @@
+[package]
+name = "rust-milter-interop"
+version = "0.0.0"
+description = "Interoperability tests for rust-milter behind real Postfix and Sendmail"
+publish = false
+rust-version = "1.89"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rust-milter = { path = "../.." }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }

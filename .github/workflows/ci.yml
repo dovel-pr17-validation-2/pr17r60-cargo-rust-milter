@@ -1,0 +1,149 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rust-toolchain.toml selects the toolchain, with rustfmt and clippy.
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+      # The style check's Clippy run: the disallowed methods of clippy.toml,
+      # except the calls a derive macro generates (ADR 0011).
+      - name: Disallowed methods
+        shell: bash
+        run: |
+          cargo clippy --workspace --all-targets --all-features --message-format=short --color never -- -W clippy::disallowed_methods 2>&1 | tee target/clippy-style.txt
+          cargo run -p rust-milter-style --bin disallowed-methods -- target/clippy-style.txt
+
+  test-linux:
+    name: Test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Rocky Linux 9
+            image: rockylinux/rockylinux:9
+            install: dnf install -y curl-minimal gcc git util-linux
+          - name: Debian 13
+            image: debian:13
+            install: >-
+              apt-get update &&
+              apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev git procps
+    # GitHub has no Rocky Linux or Debian runners, so the tests run in a
+    # container of each distribution on an Ubuntu host.
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+      # Docker may disable IPv6 in the container; the IPv6 tests need ::1.
+      options: --sysctl net.ipv6.conf.all.disable_ipv6=0
+      # The Rocky Linux image sets no PATH, so a directory added through
+      # GITHUB_PATH would replace the system directories and the next step
+      # could not find bash. Cargo and rustup go to fixed directories that
+      # PATH names from the start.
+      env:
+        CARGO_HOME: /usr/local/cargo
+        RUSTUP_HOME: /usr/local/rustup
+        PATH: /usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    env:
+      # CI must have IPv6: fail instead of skipping the IPv6 tests.
+      RUST_MILTER_TEST_IPV6: "on"
+    defaults:
+      run:
+        # bash runs with -e and pipefail, so a failed command fails its step.
+        shell: bash
+    steps:
+      # git lets actions/checkout clone. kill, which the signal tests run,
+      # is in util-linux on Rocky Linux and in procps on Debian.
+      - run: ${{ matrix.install }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rustup installs the toolchain that rust-toolchain.toml selects.
+      - run: |
+          curl --proto '=https' --tlsv1.2 --retry 5 --retry-connrefused -sSfL -o /tmp/rustup-init.sh https://sh.rustup.rs
+          sh /tmp/rustup-init.sh -y --no-modify-path --profile minimal --default-toolchain none
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.image }}
+      - run: cargo test --workspace --all-features
+      - run: cargo test --workspace --no-default-features
+
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    env:
+      # CI must have IPv6: fail instead of skipping the IPv6 tests.
+      RUST_MILTER_TEST_IPV6: "on"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test --workspace --all-features
+      - run: cargo test --workspace --no-default-features
+
+  msrv:
+    name: MSRV (Rust 1.85, library only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.85"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The tests need a newer Rust than the MSRV; the MSRV check builds the library without them.
+      - run: cargo +1.85 check -p rust-milter --lib --all-features
+      - run: cargo +1.85 check -p rust-milter --lib --no-default-features
+
+  docs:
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo doc --workspace --no-deps --all-features
+
+  deny:
+    name: Dependencies (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features
+
+  interop:
+    name: Interoperability (Postfix, Sendmail)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker compose -f tests/interop/compose.yaml run --build --rm runner
+      - if: always()
+        run: docker compose -f tests/interop/compose.yaml logs
+      - if: always()
+        run: docker compose -f tests/interop/compose.yaml down --volumes
